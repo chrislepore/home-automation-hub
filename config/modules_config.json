@@ -1,0 +1,28 @@
+{
+    "topics": {
+        "interface": {
+            "web": {
+                "input": "home/web/input",
+                "output": "home/web/output"
+            }
+        },
+        "handlers": {
+            "ble": {
+                "input": "home/handlers/ble/input",
+                "output": "home/handlers/ble/output"
+            },
+            "zigbee": {
+                "input": "home/handlers/zigbee/input",
+                "output": "home/handlers/zigbee/output"
+            },
+            "camera": {
+                "input": "home/handlers/camera/input",
+                "output": "home/handlers/camera/output"
+            },
+            "rest": {
+                "input": "home/handlers/rest/input",
+                "output": "home/handlers/rest/output"
+            }
+        }
+    }
+}

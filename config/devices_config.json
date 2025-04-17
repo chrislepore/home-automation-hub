@@ -3,6 +3,7 @@
     "light_1": {
       "device_name": "Living Room Light",
       "protocol": "MQTT",
+      "event_based": true,
       "address": "home/living_room/light",
       "commands": {
         "turn_on": "turn_on",
@@ -10,32 +11,31 @@
         "toggle": "toggle",
         "set_brightness": "brightness/{value}"
       },
-      "state_topic": "home/living_room/light/state",
-      "event_based": true
+      "state_topic": "home/living_room/light/state"
     },
-
     "thermostat_1": {
       "device_name": "Kitchen Thermostat",
       "protocol": "REST",
+      "event_based": false,
       "base_url": "http://192.168.1.50/api/thermostat",
       "commands": {
         "set_temperature": {
           "method": "POST",
           "endpoint": "/set_temp",
-          "data": { "temp": "{value}" }
+          "data": {
+            "temp": "{value}"
+          }
         },
         "get_temperature": {
           "method": "GET",
           "endpoint": "/status"
         }
-      },
-      "polling_interval": 10,
-      "event_based": false
+      }
     },
-
     "lock_1": {
       "device_name": "Front Door Lock",
       "protocol": "BLE",
+      "event_based": false,
       "ble_address": "00:1A:7D:DA:71:13",
       "commands": {
         "lock": {
@@ -46,24 +46,22 @@
           "write_characteristic": "1234",
           "value": "00"
         },
-        "get_status": { "read_characteristic": "5678" }
-      },
-      "polling_interval": 30,
-      "event_based": false
+        "get_status": {
+          "read_characteristic": "5678"
+        }
+      }
     },
-
     "sensor_1": {
       "device_name": "Hallway Motion Sensor",
       "protocol": "Zigbee",
+      "event_based": true,
       "zigbee_id": "motion_12345",
-      "commands": {},
-      "state_topic": "zigbee/motion_12345",
-      "event_based": true
+      "state_topic": "zigbee/motion_12345"
     },
-
     "light_2": {
       "device_name": "Bedroom Light",
       "protocol": "REST",
+      "event_based": false,
       "base_url": "http://192.168.1.51/api/light",
       "commands": {
         "turn_on": {
@@ -78,14 +76,12 @@
           "method": "GET",
           "endpoint": "/status"
         }
-      },
-      "polling_interval": 5,
-      "event_based": false
+      }
     },
-
     "camera_1": {
       "device_name": "Security Camera",
       "protocol": "RTSP",
+      "event_based": false,
       "stream_url": "rtsp://192.168.1.100:554/live",
       "commands": {
         "take_snapshot": {
@@ -100,31 +96,7 @@
           "method": "POST",
           "endpoint": "/record/stop"
         }
-      },
-      "polling_interval": 60,
-      "event_based": false
-    }
-  },
-  "modules": {
-    "ble": {
-      "input" : "home/handlers/ble/input",
-      "output": "home/handlers/ble/output"
-    },
-    "zigbee": {
-      "input" : "home/handlers/zigbee/input",
-      "output": "home/handlers/zigbee/output"
-    },
-    "rest": {
-      "input" : "home/handlers/rest/input",
-      "output": "home/handlers/rest/output"
-    },
-    "camera": {
-      "input" : "home/handlers/camera/input",
-      "output": "home/handlers/camera/output"
-    },
-    "web": {
-      "input" : "home/web/input",
-      "output": "home/web/output"
+      }
     }
   }
 }
