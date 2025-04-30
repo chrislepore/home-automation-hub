@@ -20,8 +20,9 @@
 
 #---Imports---
 import paho.mqtt.client as mqtt
-
-from hub.device_manager import DeviceList
+import os
+import json
+from device_manager import DeviceList
 
 #---Setup---
 
@@ -29,10 +30,21 @@ class Event:
     def __init__(self):
         pass
 
+def get_module_topics(config_path='./config/modules_config.json'):
+    if not os.path.exists(config_path):
+        print("Error: JSON file not found.")
+        return
+    with open(config_path, 'r') as file:
+        data = json.load(file)
+        print(data)
+
 #---MQTT Broker Setup---
 def on_connect(client, userdata, flags, rc):
     print("Connected with result code " + str(rc))
-    #connect to all topics
+    #connect to all module topics
+
+    #connect to all MQTT device topics
+
     client.subscribe("home/lights/#")
 
 def on_message(client, userdata, msg):
@@ -47,6 +59,12 @@ device_list = DeviceList()
 #Read device_connfig.json 
 #then load into Device class objectes and add to device_list
 
+
+get_module_topics()
+
+
+
+'''
 client = mqtt.Client(protocol=mqtt.MQTTv5)
 client.on_message = on_message
 client.on_connect = on_connect 
@@ -59,3 +77,4 @@ try:
 except KeyboardInterrupt:
     print("MQTT client loop interrupted, exiting...")
     client.disconnect()
+'''

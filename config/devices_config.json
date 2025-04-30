@@ -16,19 +16,29 @@
     "thermostat_1": {
       "device_name": "Kitchen Thermostat",
       "protocol": "REST",
-      "event_based": false,
-      "base_url": "http://192.168.1.50/api/thermostat",
       "commands": {
         "set_temperature": {
           "method": "POST",
-          "endpoint": "/set_temp",
+          "endpoint": "http://192.168.1.50/api/thermostat/set_temp",
+          "headers": {
+            "Authorization": "Bearer abcdef123456",
+            "Content-Type": "application/json"
+          },
           "data": {
             "temp": "{value}"
-          }
+          },
+          "ack": {"status": "temperature updated", "code": 200},
+          "listen": true
         },
         "get_temperature": {
           "method": "GET",
-          "endpoint": "/status"
+          "endpoint": "http://192.168.1.50/api/thermostat/status",
+          "headers": {
+            "Authorization": "Bearer abcdef123456",
+            "Content-Type": "application/json"
+          },
+          "ack": {"status": "status received", "code": 200},
+          "listen": true
         }
       }
     },
@@ -61,20 +71,36 @@
     "light_2": {
       "device_name": "Bedroom Light",
       "protocol": "REST",
-      "event_based": false,
-      "base_url": "http://192.168.1.51/api/light",
       "commands": {
         "turn_on": {
           "method": "POST",
-          "endpoint": "/on"
+          "endpoint": "http://192.168.1.51/api/light/on",
+          "headers": {
+            "Authorization": "Bearer abcdef123456",
+            "Content-Type": "application/json"
+          },
+          "ack": {"status": "light on", "code": 200},
+          "listen": false
         },
         "turn_off": {
           "method": "POST",
-          "endpoint": "/off"
+          "endpoint": "http://192.168.1.51/api/light/off",
+          "headers": {
+            "Authorization": "Bearer abcdef123456",
+            "Content-Type": "application/json"
+          },
+          "ack": {"status": "light off", "code": 200},
+          "listen": false
         },
         "get_state": {
           "method": "GET",
-          "endpoint": "/status"
+          "endpoint": "http://192.168.1.51/api/light/status",
+          "headers": {
+            "Authorization": "Bearer abcdef123456",
+            "Content-Type": "application/json"
+          },
+          "ack": {"status": "status received", "code": 200},
+          "listen": true
         }
       }
     },

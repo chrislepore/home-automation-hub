@@ -233,6 +233,14 @@ class DeviceList:
             return device.convert_command(command_name)
         else:
             print("Device not found")
+
+    def get_all_MQTTtopics(self):
+        topics = []
+        for device in self.devices:
+            if isinstance(device, MQTTDevice):
+                topic = device.get('address')
+                topics.append(topic)
+        return topics
         
 
     def print_all_devices(self):
