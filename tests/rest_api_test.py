@@ -1,11 +1,13 @@
-from flask import Flask
+# mock_device.py
+from flask import Flask, request
 
-#---Flask run---
 app = Flask(__name__)
 
-@app.route('/device-update', methods=['POST'])
-def device_update():
-    pass
+@app.route('/api/light/on', methods=['POST'])
+def light_on():
+    data = request.json
+    print(f"[DEVICE] Turn ON received: {data}")
+    return {"result": "Light turned on"}, 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(port=8000)
