@@ -22,25 +22,6 @@ class RESTList:
                 device.commands.update(new_device.commands)
                 return
         self.devices.append(new_device)
-
-    def send(self, device_id, command_id, payload=None):
-        for device in self.devices:
-            if device.device_id == device_id:
-                command = device.commands.get(command_id)
-                if command is None:
-                    print("Command not found")
-                    return
-                if command.get('method') == "POST":
-                    if payload is None:
-                        output = command.get('payload') 
-                    else:
-                        output = payload
-                    requests.post(command.get('endpoint'),
-                                  headers=command.get('headers', {}),
-                                  json=output)
-                elif command.get('method') == "GET":
-                    requests.get(command.get('endpoint'),
-                                 headers=command.get('headers', {}))
     
     def send(self, device_id, command_id, payload=None):
         for device in self.devices:
@@ -106,8 +87,8 @@ def on_message(client, userdata, msg):
 
     elif data.get('action') is not None:
         payload = data['action'].get('payload', None)
-        ack = rest_list.send(data['action']['device_id'], data['action']['command_id'], payload)
-        client.publish("home/lights/home/handlers/rest/output", json.dumps(ack))
+        result = rest_list.send(data['action']['device_id'], data['action']['command_id'], payload)
+        client.publish("home/lights/home/handlers/rest/output", json.dumps(result))
     else:
         print("Unknown MQTT message from Hub")
 
@@ -131,7 +112,7 @@ def handle_dynamic(endpoint):
             # Normalize both sides to ensure match
             expected_endpoint = details.get("endpoint", "").lstrip("/")
             print(expected_endpoint)
-            if expected_endpoint == endpoint and details.get("method", "").upper() == method:
+            if expected_endpoint == endpoint and details.get("method", "").upper() == method and details.get("listen", True):
                 print(f"Matched command '{command}' for device '{device.device_id}'")
                 data = request.get_json(force=True, silent=True) or {}
                 data["location"] = {
