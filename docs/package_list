@@ -4,3 +4,9 @@ flask
 
 pip install gunicorn
 gunicorn -w 4 -b 0.0.0.0:5000 api:app --> run the rest handler using this for production
+
+sudo apt install bluez bluez-tools libdbus-1-dev libsdbus-c++-dev 
+
+libglib2.0-dev for bluetooth glib
+
+
