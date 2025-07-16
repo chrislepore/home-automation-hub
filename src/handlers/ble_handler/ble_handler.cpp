@@ -1,10 +1,11 @@
 #include <sdbus-c++/sdbus-c++.h>
 #include <iostream>
 #include <unordered_map>
-//#include <string>
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <vector>
+#include <memory>
 
 using sdbus::ObjectPath;
 using sdbus::Variant;
@@ -14,12 +15,39 @@ const std::string DBUS_OM_IFACE = "org.freedesktop.DBus.ObjectManager";
 const std::string ADAPTER_PATH = "/org/bluez/hci0";
 const std::string ADAPTER_IFACE = "org.bluez.Adapter1";
 const std::string DEVICE_IFACE = "org.bluez.Device1";
+const std::string PROPERTIES_IFACE = "org.freedesktop.DBus.Properties";
 
 // Hold discovered device info by path
 std::unordered_map<std::string, std::map<std::string, std::map<std::string, sdbus::Variant>>> discovered;
 
+// Keep device proxies alive to receive PropertiesChanged signals
+std::unordered_map<std::string, std::unique_ptr<sdbus::IProxy>> deviceProxies;
+
+void handlePropertiesChanged(const std::string& interface,
+                             const std::map<std::string, sdbus::Variant>& changed,
+                             const std::vector<std::string>& /*invalidated*/,
+                             const ObjectPath& objectPath) //not signal variable
+{
+    if (interface != DEVICE_IFACE) return;
+
+    auto& props = discovered[objectPath][DEVICE_IFACE];
+
+    for (const auto& [key, val] : changed) props[key] = val;
+
+    std::cout << "CHG path : " << objectPath << std::endl;
+    if(props.count("Address"))
+        std::cout  << "CHG bdaddr: " << props.at("Address").get<std::string>() << std::endl;
+    if(props.count("Name"))
+        std::cout  << "CHG name: " << props.at("Name").get<std::string>() << std::endl;
+    if(props.count("RSSI"))
+        std::cout  << "CHG RSSI: " << props.at("RSSI").get<int16_t>() << std::endl;
+
+    std::cout << "---------------------------------" << std::endl;
+}
+
 void handleInterfacesAdded(const sdbus::ObjectPath& objectPath,
-                           const std::map<std::string, std::map<std::string, sdbus::Variant>>& interfaces)
+                           const std::map<std::string, std::map<std::string, sdbus::Variant>>& interfaces,
+                           const std::shared_ptr<sdbus::IConnection>& connection) //not signal variable
 {
     auto it = interfaces.find(DEVICE_IFACE);
     if (it == interfaces.end())
@@ -41,6 +69,21 @@ void handleInterfacesAdded(const sdbus::ObjectPath& objectPath,
 
     // Store it
     discovered[objectPath] = interfaces;
+
+    // Register PropertiesChanged handler for this device
+    auto deviceProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, objectPath);
+
+    deviceProxy->uponSignal("PropertiesChanged")
+                .onInterface(PROPERTIES_IFACE)
+                .call([objectPath](const std::string& interface,
+                                   const std::map<std::string, sdbus::Variant>& changed,
+                                   const std::vector<std::string>& invalidated) {
+                    handlePropertiesChanged(interface, changed, invalidated, objectPath);
+    });
+
+    deviceProxy->finishRegistration();
+
+    deviceProxies[objectPath] = std::move(deviceProxy);
 }
 
 void handleInterfacesRemoved(const sdbus::ObjectPath& objectPath,
@@ -70,30 +113,35 @@ void handleInterfacesRemoved(const sdbus::ObjectPath& objectPath,
                 }
 
                 discovered.erase(it);
+                deviceProxies.erase(objectPath);
+
                 std::cout << "--------------------------------" << std::endl;
             }
         }
     }
 }
 
-
 int main(int argc, char* argv[])
 {
 
     if(argc != 2) {
         std::cerr << "Usage Error. syntex= ./ble_handler [scan_time_in_seconds]\n";
+        return 1;
     }
     int scanTimeSec = std::stoi(argv[1]);
 
     try {
         
-        auto connection = sdbus::createSystemBusConnection();
+        std::shared_ptr<sdbus::IConnection> connection = sdbus::createSystemBusConnection();
 
         // Subscribe to InterfacesAdded signal
         auto proxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
         proxy->uponSignal("InterfacesAdded")
             .onInterface(DBUS_OM_IFACE)
-            .call(&handleInterfacesAdded);
+            .call([connection](const ObjectPath& objectPath,
+                               const std::map<std::string, std::map<std::string, Variant>>& interfaces) {
+                handleInterfacesAdded(objectPath, interfaces, connection);
+        });
         proxy->uponSignal("InterfacesRemoved")
             .onInterface(DBUS_OM_IFACE)
             .call(&handleInterfacesRemoved);
@@ -127,6 +175,7 @@ int main(int argc, char* argv[])
         connection->enterEventLoop();
 
         discovered.clear();
+        deviceProxies.clear();
 
         timerThread.join();
         std::cout << "Discovery complete. \n";
