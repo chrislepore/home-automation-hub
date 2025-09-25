@@ -1,5 +1,142 @@
 {
   "devices": {
+    "motion_sensor_1": {
+      "device_name": "SBMO-003Z",
+      "protocol": "BLE",
+      "ble_address": "38:39:8F:82:18:7E",
+      "characteristics": {
+        "Factory reset": {
+          "function": "Write 1 to restore factory settings",
+          "description": "erases all pairing keys from the device and restores the default settings",
+          "uuid": "b0a7e40f-2b87-49db-801c-eb3686a24bdb",
+          "notify": false,
+          "type": "byte",
+          "length": 1,
+          "Properties": ["Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "int",
+            "range": [0]
+          }
+        },
+        "Beacon mode enabled": {
+          "function": "Enables periodic broadcast of device status",
+          "description": "If active, the device will send periodically single advertising packets with the last status. This can be used for example for illuminance reporting.",
+          "uuid": "cb9e957e-952d-4761-a7e1-4416494a5bfa",
+          "notify": false,
+          "type": "byte",
+          "length": 1,
+          "Properties": ["Read", "Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "bool"
+          }
+        },
+        "Motion sensitivity": {
+          "function": "Three levels: 0-low, 1-medium, 2-High",
+          "description": "Sensitivity level. 3 levels of sensitivity (Low, Medium, High)",
+          "uuid": "21b5b57b-da8d-4ea4-baf8-7654a2214650",
+          "notify": false,
+          "type": "byte",
+          "length": 1,
+          "Properties": ["Read", "Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "int",
+            "range": [0, 2]
+          }
+        },
+        "LED enabled": {
+          "function": "Write 0 to disable Red LED",
+          "description": "The LED indicating motion can be disabled to save energy or avoid attracting attention or disturbing.",
+          "uuid": "24f52308-6cc6-4065-acf0-1d4574d9ba0f",
+          "notify": false,
+          "type": "byte",
+          "length": 1,
+          "Properties": ["Read", "Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "bool"
+          }
+        },
+        "Motion pulse count": {
+          "function": "1 - 4 number of movements to rise motion event",
+          "description": "The number of consecutive movements within 2 seconds period, that will fire a motion detected event.",
+          "uuid": "22f36e64-e682-4fbc-8dd6-a87f6e7b7d92",
+          "notify": false,
+          "type": "byte",
+          "length": 1,
+          "Properties": ["Read", "Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "int",
+            "range": [1, 4]
+          }
+        },
+        "Blind time": {
+          "function": "30 - 600 seconds from end of motion to clear motion state",
+          "description": "Time in seconds for the motion active state to be auto cleared after no motion is detected.",
+          "uuid": "219a1ecc-2567-4378-9dbd-0c97d10630ad",
+          "notify": false,
+          "type": "byte",
+          "length": 2,
+          "Properties": ["Read", "Write bonded", "write without response bonded"],
+          "accepted values": {
+            "type": "int",
+            "range": [30, 600]
+          }
+        },
+        "BTHome sensor data objects": {
+          "function": "Unencrypted BTHome data from the device",
+          "description": "",
+          "uuid": "d52246df-98ac-4d21-be1b-70d5f66a5ddb",
+          "notify": false,
+          "type": "array",
+          "length": null,
+          "Properties": ["Read"],
+          "accepted values": {
+            "packet id": {
+              "id": "0x00",
+              "data type": "uint8",
+              "scale facctor": 1,
+              "description": "revolving counter"
+            },
+            "battery": {
+              "id": "0x01",
+              "data type": "uint8",
+              "scale facctor": 1,
+              "description": "battery level in percent (0-100)"
+            },
+            "device type id": {
+              "id": "0xF0",
+              "data type": "uint16",
+              "scale facctor": 1,
+              "description": "device internal identification number"
+            },
+            "firmware version": {
+              "id": "0xF1",
+              "data type": "uint23",
+              "scale facctor": 1,
+              "description": "firmware version in format major.minor.patch.rc"
+            },
+            "illuminance": {
+              "id": "0x05",
+              "data type": "uint24",
+              "scale facctor": 0.01,
+              "description": "illuminance measured in lux"
+            },
+            "button": {
+              "id": "0x3A",
+              "data type": "uint16",
+              "scale facctor": 1,
+              "description": "button press event"
+            },
+            "motion": {
+              "id": "0x21",
+              "data type": "uint8",
+              "scale facctor": 1,
+              "description": "1 - motion, 0 - no motion"
+            }
+          }
+        }
+      },
+      "Beacon mode how to": ""
+    },
     "light_1": {
       "device_name": "Living Room Light",
       "protocol": "MQTT",
