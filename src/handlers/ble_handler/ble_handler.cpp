@@ -19,6 +19,7 @@ const std::string Characteristic_IFACE = "org.bluez.GattCharacteristic1";
 const std::string Descriptor_IFACE = "org.bluez.GattDescriptor1";
 const std::string PROPERTIES_IFACE = "org.freedesktop.DBus.Properties";
 
+//strusts
 struct BLEDevice {
     std::string address;       // MAC address
     std::string path;          // D-Bus object path
@@ -155,6 +156,7 @@ struct ScanHandle {
     }
 };
 
+//prototypes 
 bool set_bool_property(const std::shared_ptr<sdbus::IConnection>& connection, const std::string& devicePath, const std::string& propertyName, bool value);
 bool get_bool_property(const std::shared_ptr<sdbus::IConnection>& connection, const std::string& devicePath, std::string propertyName);
 std::string get_string_property(const std::shared_ptr<sdbus::IConnection>& connection, const std::string& devicePath, std::string propertyName);
