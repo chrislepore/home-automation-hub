@@ -756,7 +756,7 @@ int main(int argc, char* argv[])
 
     std::string mac = "38:39:8F:82:18:7E";
     std::map<std::string, std::string> characteristics;
-    characteristics.emplace("d52246df-98ac-4d21-be1b-70d5f66a5ddb");
+    characteristics.emplace("d52246df-98ac-4d21-be1b-70d5f66a5ddb", "");
     add_device(mac, characteristics);
 
     Link_Devices(connection);
