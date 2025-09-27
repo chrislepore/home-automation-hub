@@ -27,6 +27,7 @@ struct BLEDevice {
     bool discovered = false;
     bool connected = false;
     bool paired = false;
+    bool trusted = false;
     std::map<std::string, std::string> characteristics; //key=UUID value=Path
     std::shared_ptr<sdbus::IProxy> proxy;
     std::mutex mtx;
@@ -91,6 +92,16 @@ struct BLEDevice {
         return paired;
     }
 
+    void setTrusted(const bool& value) {
+        std::lock_guard<std::mutex> lock(mtx);
+        trusted = value;
+    }
+
+    bool getTrusted() {
+        std::lock_guard<std::mutex> lock(mtx);
+        return trusted;
+    }
+
     void setCharacteristics(const std::map<std::string, std::string>& value) {
         std::lock_guard<std::mutex> lock(mtx);
         characteristics = value;
@@ -145,7 +156,7 @@ struct ScanHandle {
 
     // Explicit stop method
     void stop() {
-        if (stopRequested) stopRequested->store(true); // checks if stopRequested pointer is null then -> request stop
+        if (stopRequested) stopRequested->store(true); // checks if stopRequested pointer is not null then -> request stop
         if (worker.joinable()) {
             try {
                 worker.join(); // wait for the worker thread to finish
@@ -154,6 +165,12 @@ struct ScanHandle {
             }
         }
     }
+};
+
+struct DeviceRequirement {
+    std::string mac;
+    std::vector<std::string> requiredUuids;
+    bool ready = false;
 };
 
 //prototypes 
@@ -187,6 +204,32 @@ void add_device(const std::string mac, std::map<std::string, std::string> charac
     }
 }
 
+std::map<std::string, std::string> getCharacteristics(
+    const sdbus::ObjectPath& devPath,
+    const std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>>& managedObjects)
+{
+    std::map<std::string, std::string> result;
+
+    for (const auto& [path, interfaces] : managedObjects)
+    {
+        auto it = interfaces.find(Characteristic_IFACE);
+        if (it != interfaces.end())
+        {
+            // Characteristic belongs to this device if path starts with the device path
+            if (path.find(devPath) == 0)
+            {
+                const auto& props = it->second;
+                if (props.count("UUID"))
+                {
+                    auto uuid = props.at("UUID").get<std::string>();
+                    result[uuid] = path;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
                        std::shared_ptr<std::unordered_map<std::string, std::shared_ptr<BLEDevice>>>& discovered,
                        std::mutex& discoveredMutex,
@@ -204,8 +247,7 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
 
     for (const auto& [path, interfaces] : managedObjects) 
     {
-        auto it = interfaces.find(DEVICE_IFACE);
-        if (it != interfaces.end()) 
+        if (auto it = interfaces.find(DEVICE_IFACE); it != interfaces.end()) 
         {
             const auto& props = it->second;
             if (props.count("Address")) 
@@ -222,6 +264,8 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
                     dev->discovered = true;
                     dev->connected  = props.count("Connected") ? props.at("Connected").get<bool>() : false;
                     dev->paired     = props.count("Paired") ? props.at("Paired").get<bool>() : false;
+                    dev->trusted    = props.count("Trusted") ? props.at("Trusted").get<bool>() : false;
+                    dev->characteristics = getCharacteristics(path, managedObjects);
 
                     discovered->emplace(mac, dev);
                     // publish "already known device found"
@@ -232,34 +276,54 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
 
     // 2. Register signal handlers for ongoing discovery
     handle.proxy->uponSignal("InterfacesAdded")
-        .onInterface(DBUS_OM_IFACE)
-        .call([&](const sdbus::ObjectPath& path,
-                  const std::map<std::string, std::map<std::string, sdbus::Variant>>& ifaces) {
-            auto it = ifaces.find(DEVICE_IFACE);
-            if (it != ifaces.end()) 
+    .onInterface(DBUS_OM_IFACE)
+    .call([&](const sdbus::ObjectPath& path,
+              const std::map<std::string, std::map<std::string, sdbus::Variant>>& ifaces) {
+        if (auto it = ifaces.find(DEVICE_IFACE); it != ifaces.end())
+        {
+            // Device discovered
+            const auto& props = it->second;
+            if (props.count("Address"))
             {
-                const auto& props = it->second;
-                if (props.count("Address")) 
+                auto mac = props.at("Address").get<std::string>();
+                std::lock_guard<std::mutex> lock(discoveredMutex);
+                if (discovered->find(mac) == discovered->end())
                 {
-                    auto mac = props.at("Address").get<std::string>();
+                    auto dev        = std::make_shared<BLEDevice>();
+                    dev->address    = mac;
+                    dev->path       = path;
+                    dev->name       = props.count("Name") ? props.at("Name").get<std::string>() : "";
+                    dev->discovered = true;
+                    dev->connected  = props.count("Connected") ? props.at("Connected").get<bool>() : false;
+                    dev->paired     = props.count("Paired") ? props.at("Paired").get<bool>() : false;
+                    dev->trusted    = props.count("Trusted") ? props.at("Trusted").get<bool>() : false;
 
-                    std::lock_guard<std::mutex> lock(discoveredMutex);
-                    if (discovered->find(mac) == discovered->end()) 
+                    discovered->emplace(mac, dev);
+                }
+            }
+        }
+        else if (auto it = ifaces.find(Characteristic_IFACE); it != ifaces.end())
+        {
+            // New characteristic discovered
+            const auto& props = it->second;
+            if (props.count("UUID"))
+            {
+                auto uuid = props.at("UUID").get<std::string>();
+
+                // Find parent device by matching prefix of path
+                std::lock_guard<std::mutex> lock(discoveredMutex);
+                for (auto& [mac, dev] : *discovered)
+                {
+                    if (path.find(dev->path) == 0) // child of device
                     {
-                        auto dev        = std::make_shared<BLEDevice>();
-                        dev->address    = mac;
-                        dev->path       = path;
-                        dev->name       = props.count("Name") ? props.at("Name").get<std::string>() : "";
-                        dev->discovered = true;
-                        dev->connected  = props.count("Connected") ? props.at("Connected").get<bool>() : false;
-                        dev->paired     = props.count("Paired") ? props.at("Paired").get<bool>() : false;
-
-                        discovered->emplace(mac, dev);
-                        // publish "newly discovered device"
+                        dev->characteristics[uuid] = path;
+                        break;
                     }
                 }
             }
+        }
     });
+
 
     handle.proxy->uponSignal("InterfacesRemoved")
         .onInterface(DBUS_OM_IFACE)
@@ -329,40 +393,69 @@ void Link_Devices(const std::shared_ptr<sdbus::IConnection>& connection, int sca
     auto discovered = std::make_shared<
         std::unordered_map<std::string, std::shared_ptr<BLEDevice>>>();
     std::mutex discoveredMutex;
-    std::vector<std::string> Devices_Mac;
-    
+
+    // Build device_list with expected MACs + UUIDs from devices
+    std::vector<DeviceRequirement> device_list;
     {
         std::lock_guard<std::mutex> lock(devicesMutex);
-        for(const auto& [mac, device]: devices) Devices_Mac.push_back(mac);
+        for (const auto& [mac, device] : devices) {
+            DeviceRequirement req;
+            req.mac = mac;
+
+            // Pull UUIDs from the saved BLEDevice characteristics
+            for (const auto& [uuid, _] : device->characteristics) {
+                req.requiredUuids.push_back(uuid);
+            }
+
+            device_list.push_back(std::move(req));
+        }
     }
 
     auto handle = scanDevices(connection, discovered, discoveredMutex, scanTimeMs);
 
-    //loop through discovered
-    //if discovered has all mac from Devices_Mac then exit 
-
     while (!handle.stopRequested->load()) 
     {
-        bool foundAll = true;
+        bool allReady = true;
+
         {
             std::lock_guard<std::mutex> lock(discoveredMutex);
-            for(const auto& mac : Devices_Mac) {
-                if(discovered->find(mac) == discovered->end()) {
-                    foundAll = false;
-                    break;
+
+            for (auto& req : device_list) {
+                auto it = discovered->find(req.mac);
+                if (it == discovered->end()) {
+                    req.ready = false;
+                    allReady = false;
+                    continue;
+                }
+
+                auto dev = it->second;
+                bool hasAllUuids = true;
+                for (const auto& uuid : req.requiredUuids) {
+                    auto charIt = dev->characteristics.find(uuid);
+                    if (charIt == dev->characteristics.end() || charIt->second.empty()) {
+                        hasAllUuids = false;
+                        break;
+                    }
+                }
+
+                req.ready = hasAllUuids;
+                if (!req.ready) {
+                    allReady = false;
                 }
             }
         }
 
-        if (foundAll) {
-            handle.stop(); // this will join worker
+        if (allReady) {
+            // Grace period to catch in-flight signals
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+            handle.stop(); // join worker + stop discovery
             break;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    
     for(const auto& [mac, dev] : *discovered)
     {
         {
@@ -372,21 +465,65 @@ void Link_Devices(const std::shared_ptr<sdbus::IConnection>& connection, int sca
         }
         auto path = dev->getPath();
 
+        //---create signal handler---
+        std::shared_ptr<sdbus::IProxy> proxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
+        dev->setProxy(proxy);
+
+        // Capture weak_ptr to device so handler won’t access dangling memory
+        std::weak_ptr<BLEDevice> weakDev = dev;
+
+        dev->proxy->uponSignal("PropertiesChanged")
+            .onInterface(PROPERTIES_IFACE)
+            .call([&](const std::string& interface,
+                    const std::map<std::string, sdbus::Variant>& changed,
+                    const std::vector<std::string>& invalidated) {
+                if (interface != DEVICE_IFACE)
+                    return;
+
+                if (auto device = weakDev.lock()) { // ✅ safe
+                    bool updated = false;
+
+                    // Connected
+                    auto it = changed.find("Connected");
+                    if (it != changed.end()) {
+                        bool connected = it->second.get<bool>();
+                        device->setConnected(connected);
+                        std::cout << "Device " << device->getAddress()
+                                << " updated Connected: " << connected << std::endl;
+                        updated = true;
+                    }
+
+                    // Paired
+                    it = changed.find("Paired");
+                    if (it != changed.end()) {
+                        bool paired = it->second.get<bool>();
+                        device->setPaired(paired);
+                        std::cout << "Device " << device->getAddress()
+                                << " updated Paired: " << paired << std::endl;
+                        updated = true;
+                    }
+
+                    // Trusted
+                    it = changed.find("Trusted");
+                    if (it != changed.end()) {
+                        bool trusted = it->second.get<bool>();
+                        device->setTrusted(trusted);
+                        std::cout << "Device " << device->getAddress()
+                                << " updated Trusted: " << trusted << std::endl;
+                        updated = true;
+                    }
+
+                    if (updated) {
+                        // Publish changes to MQTT or other system here
+                    }
+                }
+        });
+        dev->proxy->finishRegistration();
 
         std::cout << "Added BLE device path: " << path << " to " << mac << std::endl;
 
-        bool connected = get_bool_property(connection, path, "Connected");
-        if (!connected) {
-            connected = connectDevice(connection, dev);
-        }
-
-        bool paired = get_bool_property(connection, path, "Paired");
-        if (!paired) {
-            paired = pairDevice(connection, dev);
-        }
-
-        //get characteristics
-        /*it would be better to create BLE Device map and fill it first from the hub info and then call link devices*/
+        if (!dev->getConnected()) connectDevice(connection, dev);
+        if (!dev->getPaired()) pairDevice(connection, dev);
     }
 }
 
@@ -461,163 +598,131 @@ std::string get_string_property(const std::shared_ptr<sdbus::IConnection>& conne
 }
 
 bool pairDevice(const std::shared_ptr<sdbus::IConnection>& connection,
-                     const std::shared_ptr<BLEDevice>& device,
-                     int maxRetries,
-                     int timeoutMs)
+                const std::shared_ptr<BLEDevice>& device,
+                int maxRetries,
+                int timeoutMs)
 {
-    std::string path = device->getPath();
+    auto proxy = device->getProxy();
+    if (!proxy) return false; // must have a proxy
 
-    if(!device->getDiscovered() || path.empty()) 
+    // Already paired? Nothing to do
+    if (device->getPaired()) return true;
+
+    std::string path = device->getPath();
+    if (!device->getDiscovered() || path.empty()) 
     {
-        std::cerr << "[WARN] Device " << device->getAddress() << " not discovered yet, skipping.\n";
+        std::cerr << "[WARN] Device " << device->getAddress() 
+                  << " not discovered yet, skipping.\n";
         return false;
     }
 
-    if(get_bool_property(connection, path, "Paired")) 
+    for (int attempt = 1; attempt <= maxRetries; ++attempt) 
     {
-        std::cout << "[OK] Device already paired" << std::endl;
-        device->setPaired(true);
-        return true;
-    }
-
-    auto deviceProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
-
-    for (int attempt = 1; attempt <= maxRetries; ++attempt) {
-        std::cout << "[INFO] Pair attempt " << attempt << " for " << path << std::endl;
-        bool paired = false;
+        std::cout << "[INFO] Pair attempt " << attempt 
+                  << " for " << path << std::endl;
 
         try {
-            deviceProxy->callMethod("Pair")
-                       .onInterface(DEVICE_IFACE)
-                       .withTimeout(std::chrono::milliseconds(timeoutMs));
-
-            // Check paired property after method call
-            paired = deviceProxy->getProperty("Paired")
-                                .onInterface(DEVICE_IFACE)
-                                .get<bool>();
-        } catch (const sdbus::Error& e) {
+            // Initiate Pair call
+            proxy->callMethod("Pair")
+                 .onInterface(DEVICE_IFACE)
+                 .withTimeout(std::chrono::milliseconds(timeoutMs));
+        } 
+        catch (const sdbus::Error& e) 
+        {
             std::cerr << "[ERROR] Pair attempt " << attempt
                       << " failed: " << e.getName() << " - " << e.getMessage() << std::endl;
-            if(e.getName() == "org.bluez.Error.InProgress")
-            {
-                try {
-                    deviceProxy->callMethod("CancelPairing").onInterface(DEVICE_IFACE);
-                    continue;
-                } catch (const sdbus::Error& e) {
-                    std::cerr << "Error: " << e.getName() << " - " << e.getMessage() << "\n"; 
-                    // Ignore errors
-                }
-            }
         }
 
-        if (paired) {
-            std::cout << "[OK] Device paired successfully on attempt " << attempt << std::endl;
-            device->setPaired(true);
+        // Wait for signal to update device->paired
+        auto start = std::chrono::steady_clock::now();
+        while (!device->getPaired() &&
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start
+               ).count() < timeoutMs) 
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
 
-            bool connected = get_bool_property(connection, path, "Connected");
-            device->setConnected(connected);
+        if (device->getPaired()) 
+        {
+            std::cout << "[OK] Device paired successfully on attempt " 
+                      << attempt << std::endl;
 
-            if(!get_bool_property(connection, path, "Trusted")) set_bool_property(connection, path, "Trusted", true);
+            if(!device->getTrusted()) set_bool_property(connection, path, "Trusted", true);
 
             return true;
         }
 
-        // If not last attempt, wait and retry
-        if (attempt < maxRetries) {
+        // Retry delay
+        if (attempt < maxRetries) 
+        {
             std::this_thread::sleep_for(std::chrono::seconds(2));
         }
     }
-
-    bool connected = get_bool_property(connection, path, "Connected");
-    device->setConnected(connected);
 
     std::cerr << "[FAIL] Device failed to pair after " << maxRetries << " attempts" << std::endl;
     return false;
 }
 
 bool connectDevice(const std::shared_ptr<sdbus::IConnection>& connection,
-                        const std::shared_ptr<BLEDevice>& device,
-                        int maxRetries,
-                        int timeoutMs)
+                   const std::shared_ptr<BLEDevice>& device,
+                   int maxRetries,
+                   int timeoutMs)
 {
-    std::string path = device->getPath();
+    auto proxy = device->getProxy();
+    if (!proxy) return false; // must have a proxy
 
+    // Already connected? Nothing to do
+    if (device->getConnected()) return true;
+
+    std::string path = device->getPath();
     if (!device->getDiscovered() || path.empty()) 
     {
-        std::cerr << "[WARN] Device " << device->getAddress() << " not discovered yet, skipping.\n";
+        std::cerr << "[WARN] Device " << device->getAddress() 
+                  << " not discovered yet, skipping.\n";
         return false;
     }
 
-    if(get_bool_property(connection, path, "Connected")) 
+    for (int attempt = 1; attempt <= maxRetries; ++attempt) 
     {
-        std::cout << "[OK] Device already connected" << std::endl;
-        device->setConnected(true);
-        return true;
-    }
-
-    auto rawProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
-
-    for (int attempt = 1; attempt <= maxRetries; ++attempt) {
-        std::cout << "[INFO] Connect attempt " << attempt << " for " << path << std::endl;
-        bool connected = false;
+        std::cout << "[INFO] Connect attempt " << attempt 
+                  << " for " << path << std::endl;
 
         try {
-            rawProxy->callMethod("Connect")
-                       .onInterface(DEVICE_IFACE)
-                       .withTimeout(std::chrono::milliseconds(timeoutMs));
-
-            connected = rawProxy->getProperty("Connected")
-                                   .onInterface(DEVICE_IFACE)
-                                   .get<bool>();
-        } catch (const sdbus::Error& e) {
+            // Initiate Connect call
+            proxy->callMethod("Connect")
+                         .onInterface(DEVICE_IFACE)
+                         .withTimeout(std::chrono::milliseconds(timeoutMs));
+        } 
+        catch (const sdbus::Error& e) 
+        {
             std::cerr << "[ERROR] Connect attempt " << attempt
                       << " failed: " << e.getName() << " - " << e.getMessage() << std::endl;
         }
 
-        if (connected) {
-            std::cout << "[OK] Device connected successfully on attempt " << attempt << std::endl;
-            device->setConnected(true);
+        // Wait for signal to update device->connected
+        auto start = std::chrono::steady_clock::now();
+        while (!device->getConnected() &&
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start
+               ).count() < timeoutMs) 
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
 
-            // Convert unique_ptr -> shared_ptr
-            auto proxyShared = std::shared_ptr<sdbus::IProxy>(std::move(rawProxy));
-            device->setProxy(proxyShared);
-
-            // Capture weak_ptr to device so handler won’t access dangling memory
-            std::weak_ptr<BLEDevice> weakDev = device;
-
-            //Add - listen for PropertiesChanged signal on connected to see if it's still connected.
-            device->proxy->uponSignal("PropertiesChanged")
-                .onInterface(PROPERTIES_IFACE)
-                .call([&](const std::string& interface,
-                          const std::map<std::string, sdbus::Variant>& changed,
-                          const std::vector<std::string>& invalidated) {
-                    if (interface == DEVICE_IFACE) {
-                        auto it = changed.find("Connected"); //maybe check paired & service resolved too
-                        if (it != changed.end()) {
-                            if (auto dev = weakDev.lock()) { // ✅ safe
-                                bool connected = it->second.get<bool>();
-                                dev->setConnected(connected);
-                                std::cout << "Device " << dev->getAddress()
-                                          << " updated connection: " << connected << std::endl;
-                            }
-                        }
-                    }
-                    //Publish change to MQTT
-            });
-            device->proxy->finishRegistration();
-
+        if (device->getConnected()) 
+        {
+            std::cout << "[OK] Device connected successfully on attempt " 
+                      << attempt << std::endl;
             return true;
         }
 
-        // If not last attempt, wait and retry
-        if (attempt < maxRetries) {
+        // Disconnect before next retry
+        if (attempt < maxRetries) 
+        {
             std::this_thread::sleep_for(std::chrono::seconds(2));
-            try {
-                rawProxy->callMethod("Disconnect").onInterface(DEVICE_IFACE);
-            } catch (const sdbus::Error& e) {
-                std::cerr << "Error: " << e.getName() << " - " << e.getMessage() << "\n"; 
-                // Ignore errors
-            }
+            try { proxy->callMethod("Disconnect").onInterface(DEVICE_IFACE); }
+            catch (const sdbus::Error& e) { std::cerr << "Error: " << e.getName() << " - " << e.getMessage() << "\n"; }
         }
     }
 
@@ -628,11 +733,8 @@ bool connectDevice(const std::shared_ptr<sdbus::IConnection>& connection,
 bool DisconnectDevice(const std::shared_ptr<sdbus::IConnection>& connection, BLEDevice& device) {
     std::string path = device.getPath();
     try {
-        auto deviceProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
-        deviceProxy->callMethod("Disconnect").onInterface(DEVICE_IFACE);
+        device.getProxy()->callMethod("Disconnect").onInterface(DEVICE_IFACE);
         std::cout << "Disonnected OK to " << path << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        device.setConnected(get_bool_property(connection, path, "Connected"));
         return true;
     } catch (const sdbus::Error& e) {
         std::cerr << "Failed to Disconnect: " << e.getName() << " - " << e.getMessage() << std::endl;
@@ -654,6 +756,7 @@ int main(int argc, char* argv[])
 
     std::string mac = "38:39:8F:82:18:7E";
     std::map<std::string, std::string> characteristics;
+    characteristics.emplace("d52246df-98ac-4d21-be1b-70d5f66a5ddb");
     add_device(mac, characteristics);
 
     Link_Devices(connection);
