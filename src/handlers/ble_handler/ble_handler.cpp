@@ -169,12 +169,6 @@ struct ScanHandle {
     }
 };
 
-struct DeviceRequirement {
-    std::string mac;
-    std::vector<std::string> requiredUuids;
-    bool ready = false;
-};
-
 enum class ValueType {
     UINT8,
     INT16,
@@ -199,21 +193,20 @@ bool connectDevice(const std::shared_ptr<sdbus::IConnection>& connection, const 
                    int maxRetries = 3, int timeoutMs = 10000);
 bool DisconnectDevice(const std::shared_ptr<sdbus::IConnection>& connection, BLEDevice& device);
 void Link_Devices(const std::shared_ptr<sdbus::IConnection>& connection, int scanTimeMs = 40000);
-void add_device(const std::string mac, std::map<std::string, std::string> characteristics);
+void add_device(const std::string mac);
 
 std::unordered_map<std::string, std::shared_ptr<BLEDevice>> devices; //key = mac address
 std::mutex devicesMutex;
 
-void add_device(const std::string mac, std::map<std::string, std::string> characteristics)
+void add_device(const std::string mac)
 {
     std::lock_guard<std::mutex> lock(devicesMutex);
     if (devices.find(mac) == devices.end()) 
     {
         auto dev = std::make_shared<BLEDevice>();
         dev->address = mac;
-        dev->characteristics = characteristics;
         devices[mac] = dev;
-        std::cout << "saved BLE device: " << mac  << std::endl;
+        std::cout << "saved BLE device to devices: " << mac  << std::endl;
     }
 }
 
@@ -254,9 +247,14 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
 
     // 1. Populate with already-known devices
     std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>> managedObjects;
-    handle.proxy->callMethod("GetManagedObjects")
-        .onInterface(DBUS_OM_IFACE)
-        .storeResultsTo(managedObjects);
+    try {
+        handle.proxy->callMethod("GetManagedObjects")
+            .onInterface(DBUS_OM_IFACE)
+            .storeResultsTo(managedObjects);
+    } 
+    catch (const sdbus::Error& e) {
+        std::cerr << "Faild to GetManagedObjects: " << e.getName() << " - " << e.getMessage() << "\n";
+    }
 
     for (const auto& [path, interfaces] : managedObjects) 
     {
@@ -282,6 +280,7 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
 
                     discovered->emplace(mac, dev);
                     // publish "already known device found"
+                    std::cout << "publish already known device discovered: " << path << std::endl;
                 }
             }
         }
@@ -313,27 +312,7 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
 
                     discovered->emplace(mac, dev);
                     // publish "device added"
-                    std::cout << "device added: " << path <<std::endl;
-                }
-            }
-        }
-        else if (auto it = ifaces.find(Characteristic_IFACE); it != ifaces.end())
-        {
-            // New characteristic discovered
-            const auto& props = it->second;
-            if (props.count("UUID"))
-            {
-                auto uuid = props.at("UUID").get<std::string>();
-
-                // Find parent device by matching prefix of path
-                std::lock_guard<std::mutex> lock(discoveredMutex);
-                for (auto& [mac, dev] : *discovered)
-                {
-                    if (path.find(dev->path) == 0) // child of device
-                    {
-                        dev->characteristics[uuid] = path;
-                        break;
-                    }
+                    std::cout << "device discovered: " << path << std::endl;
                 }
             }
         }
@@ -351,6 +330,7 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
                     if (it2->second->path == path) 
                     {
                         // publish "device removed"
+                        std::cout << "device removed from discovered: " << path << std::endl;
                         it2 = discovered->erase(it2);
                     } else {
                         ++it2;
@@ -408,58 +388,29 @@ void Link_Devices(const std::shared_ptr<sdbus::IConnection>& connection, int sca
         std::unordered_map<std::string, std::shared_ptr<BLEDevice>>>();
     std::mutex discoveredMutex;
 
-    // Build device_list with expected MACs + UUIDs from devices
-    std::vector<DeviceRequirement> device_list;
+    // Build device_list with expected MACs from devices
+    std::vector<std::string> Devices_list;
     {
         std::lock_guard<std::mutex> lock(devicesMutex);
-        for (const auto& [mac, device] : devices) {
-            DeviceRequirement req;
-            req.mac = mac;
-
-            // Pull UUIDs from the saved BLEDevice characteristics
-            for (const auto& [uuid, _] : device->characteristics) {
-                req.requiredUuids.push_back(uuid);
-            }
-
-            device_list.push_back(std::move(req));
-        }
+        for(const auto& [mac, device]: devices) Devices_list.push_back(mac);
     }
 
     auto handle = scanDevices(connection, discovered, discoveredMutex, scanTimeMs);
 
     while (!handle.stopRequested->load()) 
     {
-        bool allReady = true;
-
+        bool foundAll = true;
         {
             std::lock_guard<std::mutex> lock(discoveredMutex);
-
-            for (auto& req : device_list) {
-                auto it = discovered->find(req.mac);
-                if (it == discovered->end()) {
-                    req.ready = false;
-                    allReady = false;
-                    continue;
-                }
-
-                auto dev = it->second;
-                bool hasAllUuids = true;
-                for (const auto& uuid : req.requiredUuids) {
-                    auto charIt = dev->characteristics.find(uuid);
-                    if (charIt == dev->characteristics.end() || charIt->second.empty()) {
-                        hasAllUuids = false;
-                        break;
-                    }
-                }
-
-                req.ready = hasAllUuids;
-                if (!req.ready) {
-                    allReady = false;
+            for(const auto& mac : Devices_list) {
+                if(discovered->find(mac) == discovered->end()) {
+                    foundAll = false;
+                    break;
                 }
             }
         }
 
-        if (allReady) {
+        if (foundAll) {
             // Grace period to catch in-flight signals
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
@@ -728,6 +679,36 @@ bool connectDevice(const std::shared_ptr<sdbus::IConnection>& connection,
         {
             std::cout << "[OK] Device connected successfully on attempt " 
                       << attempt << std::endl;
+
+            // --search for characteristics--
+            auto slashProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
+            std::map<std::string, std::string> characteristics;
+            std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>> managedObjects;
+            try {
+                slashProxy->callMethod("GetManagedObjects")
+                    .onInterface(DBUS_OM_IFACE)
+                    .storeResultsTo(managedObjects);
+            } 
+            catch (const sdbus::Error& e) {
+                std::cerr << "Faild to GetManagedObjects: " << e.getName() << " - " << e.getMessage() << "\n";
+            }
+
+            for (const auto& [objPath, interfaces] : managedObjects) {
+                // Only include characteristics belonging to this device
+                if (objPath.find(path) != 0)
+                    continue;
+
+                auto itChar = interfaces.find(Characteristic_IFACE);
+                if (itChar != interfaces.end()) {
+                    const auto& props = itChar->second;
+                    if (props.count("UUID")) {
+                        std::string uuid = props.at("UUID").get<std::string>();
+                        characteristics[uuid] = objPath; // path of characteristic
+                    }
+                }
+            }
+            device->setCharacteristics(characteristics);
+            
             return true;
         }
 
@@ -889,6 +870,38 @@ void WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
 int main(int argc, char* argv[])
 {
     std::shared_ptr<sdbus::IConnection> connection = sdbus::createSystemBusConnection();
+
+    // Monitor when devices are removed
+    auto Proxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
+    Proxy->uponSignal("InterfacesAdded")
+        .onInterface(DBUS_OM_IFACE)
+        .call([&](const sdbus::ObjectPath& path,
+                const std::vector<std::string>& ifaces) {
+            std::lock_guard<std::mutex> lock(devicesMutex);
+            for (auto& [mac, device] : devices) {
+                if (device->getPath() == path) {
+                    device->setDiscovered(true);
+                    std::cout << "Device " << mac << " readded to devices!" << std::endl;
+                }
+            }
+    });
+    // Monitor when devices are added back (reappear)
+    Proxy->uponSignal("InterfacesRemoved")
+        .onInterface(DBUS_OM_IFACE)
+        .call([&](const sdbus::ObjectPath& path,
+                const std::vector<std::string>& ifaces) {
+            std::lock_guard<std::mutex> lock(devicesMutex);
+            for (auto& [mac, device] : devices) {
+                if (device->getPath() == path) {
+                    device->setConnected(false);
+                    device->setPaired(false);
+                    device->setDiscovered(false);
+                    std::cout << "Device " << mac << " removed from devices!" << std::endl;
+                }
+            }
+    });
+    Proxy->finishRegistration();
+
     
     // Run the event loop in a background thread
     std::thread loopThread([&] {
@@ -896,15 +909,14 @@ int main(int argc, char* argv[])
     });
 
     std::string mac = "38:39:8F:82:18:7E";
-    std::map<std::string, std::string> characteristics;
-    characteristics.emplace("d52246df-98ac-4d21-be1b-70d5f66a5ddb", "");
-    add_device(mac, characteristics);
+    add_device(mac);
 
     std::cout << "Device List---\n";
     for(const auto& device : devices)
     {
         std::cout << "device: " << device.second->getAddress() << std::endl;
         std::cout << "path: " << device.second->getPath() << std::endl;
+        std::cout << "discovered: " << device.second->getDiscovered() << std::endl;
         std::cout << "connected: " << device.second->getConnected() << std::endl;
         std::cout << "paired: " << device.second->getPaired() << std::endl << std::endl;
     }
@@ -925,8 +937,28 @@ int main(int argc, char* argv[])
             {
                 std::cout << "device: " << device.second->getAddress() << std::endl;
                 std::cout << "path: " << device.second->getPath() << std::endl;
+                std::cout << "discovered: " << device.second->getDiscovered() << std::endl;
                 std::cout << "connected: " << device.second->getConnected() << std::endl;
                 std::cout << "paired: " << device.second->getPaired() << std::endl << std::endl;
+            }
+        }
+        if(cmd == "print")
+        {
+            std::cout << "Device List---\n";
+            std::lock_guard<std::mutex> lock(devicesMutex);
+            for(const auto& device : devices)
+            {
+                std::cout << "device: " << device.second->getAddress() << std::endl;
+                std::cout << "path: " << device.second->getPath() << std::endl;
+                std::cout << "discovered: " << device.second->getDiscovered() << std::endl;
+                std::cout << "connected: " << device.second->getConnected() << std::endl;
+                std::cout << "trusted: " << device.second->getTrusted() << std::endl;
+                std::cout << "paired: " << device.second->getPaired() << std::endl;
+                for(const auto& [uuid, path] : device.second->getCharacteristics())
+                {
+                    std::cout << "characteristic: " << uuid << "- " << path << std::endl;
+                }
+                std::cout << std::endl;
             }
         }
         else if(cmd == "connect")
