@@ -10,3 +10,4 @@ sudo apt install bluez bluez-tools libdbus-1-dev libsdbus-c++-dev
 libglib2.0-dev for bluetooth glib
 
 
+sudo apt install nlohmann-json3-dev

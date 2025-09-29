@@ -5,7 +5,9 @@
 #include <thread>
 #include <chrono>
 #include <mutex>
+#include <nlohmann/json.hpp>
 
+using json = nlohmann::json;
 using sdbus::ObjectPath;
 using sdbus::Variant;
 
@@ -19,7 +21,7 @@ const std::string Characteristic_IFACE = "org.bluez.GattCharacteristic1";
 const std::string Descriptor_IFACE = "org.bluez.GattDescriptor1";
 const std::string PROPERTIES_IFACE = "org.freedesktop.DBus.Properties";
 
-//strusts
+//strusts & enum
 struct BLEDevice {
     std::string address;       // MAC address
     std::string path;          // D-Bus object path
@@ -173,6 +175,17 @@ struct DeviceRequirement {
     bool ready = false;
 };
 
+enum class ValueType {
+    UINT8,
+    INT16,
+    UINT16,
+    INT32,
+    UINT32,
+    FLOAT32,
+    STRING,
+    HEX
+};
+
 //prototypes 
 bool set_bool_property(const std::shared_ptr<sdbus::IConnection>& connection, const std::string& devicePath, const std::string& propertyName, bool value);
 bool get_bool_property(const std::shared_ptr<sdbus::IConnection>& connection, const std::string& devicePath, std::string propertyName);
@@ -299,6 +312,8 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
                     dev->trusted    = props.count("Trusted") ? props.at("Trusted").get<bool>() : false;
 
                     discovered->emplace(mac, dev);
+                    // publish "device added"
+                    std::cout << "device added: " << path <<std::endl;
                 }
             }
         }
@@ -323,8 +338,6 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
             }
         }
     });
-
-
     handle.proxy->uponSignal("InterfacesRemoved")
         .onInterface(DBUS_OM_IFACE)
         .call([&](const sdbus::ObjectPath& path,
@@ -345,6 +358,7 @@ ScanHandle scanDevices(const std::shared_ptr<sdbus::IConnection>& connection,
                 }
             }
     });
+    handle.proxy->finishRegistration();
 
     // (3) Start discovery
     try {
@@ -745,6 +759,133 @@ bool DisconnectDevice(const std::shared_ptr<sdbus::IConnection>& connection, BLE
     }
 }
 
+std::string ReadCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
+                               BLEDevice& device,
+                               const std::string& uuid,
+                               ValueType type)
+{
+    auto it = device.getCharacteristics().find(uuid);
+    if (it == device.getCharacteristics().end()) {
+        throw std::runtime_error("Characteristic " + uuid + " not found for device");
+    }
+    std::string path = it->second;
+
+    auto characteristicProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
+
+    std::map<std::string, sdbus::Variant> options{};
+    std::vector<uint8_t> response;
+
+    characteristicProxy->callMethod("ReadValue")
+                       .onInterface(Characteristic_IFACE)
+                       .withArguments(options)
+                       .storeResultsTo(response);
+
+    // Build JSON result
+    json j;
+    j["device"] = device.getAddress();
+    j["uuid"]   = uuid;
+    j["type"]   = ""; // will fill below
+
+    // Raw hex string
+    std::ostringstream rawHex;
+    for (auto b : response) {
+        rawHex << std::hex << std::setw(2) << std::setfill('0')
+               << static_cast<int>(b);
+    }
+    j["raw"] = rawHex.str();
+
+    // Parsed value depending on type
+    switch (type) {
+        case ValueType::UINT8:
+            j["type"] = "UINT8";
+            if (!response.empty())
+                j["value"] = static_cast<unsigned>(response[0]);
+            break;
+
+        case ValueType::INT16:
+            j["type"] = "INT16";
+            if (response.size() >= 2) {
+                int16_t val = static_cast<int16_t>(response[0] | (response[1] << 8));
+                j["value"] = val;
+            }
+            break;
+
+        case ValueType::UINT16:
+            j["type"] = "UINT16";
+            if (response.size() >= 2) {
+                uint16_t val = static_cast<uint16_t>(response[0] | (response[1] << 8));
+                j["value"] = val;
+            }
+            break;
+
+        case ValueType::INT32:
+            j["type"] = "INT32";
+            if (response.size() >= 4) {
+                int32_t val = response[0] | (response[1] << 8) | (response[2] << 16) | (response[3] << 24);
+                j["value"] = val;
+            }
+            break;
+
+        case ValueType::UINT32:
+            j["type"] = "UINT32";
+            if (response.size() >= 4) {
+                uint32_t val = response[0] | (response[1] << 8) | (response[2] << 16) | (response[3] << 24);
+                j["value"] = val;
+            }
+            break;
+
+        case ValueType::FLOAT32:
+            j["type"] = "FLOAT32";
+            if (response.size() >= 4) {
+                float val;
+                uint32_t raw = response[0] | (response[1] << 8) | (response[2] << 16) | (response[3] << 24);
+                std::memcpy(&val, &raw, sizeof(val));
+                j["value"] = val;
+            }
+            break;
+
+        case ValueType::STRING:
+            j["type"] = "STRING";
+            j["value"] = std::string(response.begin(), response.end());
+            break;
+
+        case ValueType::HEX:
+        default:
+            j["type"] = "HEX";
+            j["value"] = j["raw"]; // same as raw hex
+            break;
+    }
+
+    return j.dump(); // return JSON string (ready to publish)
+}
+
+void WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
+                         BLEDevice& device,
+                         const std::string& uuid,
+                         const std::vector<uint8_t>& value,
+                         bool withResponse = true)
+{
+    // Find the characteristic path from the device
+    auto it = device.getCharacteristics().find(uuid);
+    if (it == device.getCharacteristics().end()) {
+        throw std::runtime_error("Characteristic " + uuid + " not found for device");
+    }
+    std::string path = it->second;
+
+    // Create D-Bus proxy to the characteristic
+    auto characteristicProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
+
+    // Options map can include "type" = "request" (write with response) or "command" (write without response)
+    std::map<std::string, sdbus::Variant> options;
+    options["type"] = sdbus::Variant(withResponse ? std::string("request") 
+                                                  : std::string("command"));
+
+    // Perform the WriteValue call
+    characteristicProxy->callMethod("WriteValue")
+        .onInterface(Characteristic_IFACE)
+        .withArguments(value, options);
+}
+
 int main(int argc, char* argv[])
 {
     std::shared_ptr<sdbus::IConnection> connection = sdbus::createSystemBusConnection();
@@ -759,20 +900,66 @@ int main(int argc, char* argv[])
     characteristics.emplace("d52246df-98ac-4d21-be1b-70d5f66a5ddb", "");
     add_device(mac, characteristics);
 
-    Link_Devices(connection);
-
     std::cout << "Device List---\n";
     for(const auto& device : devices)
     {
-        std::cout << "device: " << device.second->address << std::endl;
-        std::cout << "path: " << device.second->path << std::endl;
-        std::cout << "connected: " << device.second->connected << std::endl;
-        std::cout << "paired: " << device.second->paired << std::endl << std::endl;
+        std::cout << "device: " << device.second->getAddress() << std::endl;
+        std::cout << "path: " << device.second->getPath() << std::endl;
+        std::cout << "connected: " << device.second->getConnected() << std::endl;
+        std::cout << "paired: " << device.second->getPaired() << std::endl << std::endl;
     }
 
-    // Keep running, or wait for a key press
-    std::cout << "Press ENTER to quit...\n";
-    std::cin.get();
+    while(true)
+    {
+        std::string cmd;
+        std::cout << "Enter cmd: ";
+        std::cin >> cmd; 
+
+        if(cmd == "link")
+        {
+            Link_Devices(connection);
+
+            std::cout << "Device List---\n";
+            std::lock_guard<std::mutex> lock(devicesMutex);
+            for(const auto& device : devices)
+            {
+                std::cout << "device: " << device.second->getAddress() << std::endl;
+                std::cout << "path: " << device.second->getPath() << std::endl;
+                std::cout << "connected: " << device.second->getConnected() << std::endl;
+                std::cout << "paired: " << device.second->getPaired() << std::endl << std::endl;
+            }
+        }
+        else if(cmd == "connect")
+        {
+            std::shared_ptr<BLEDevice> dev;
+            { 
+                std::lock_guard<std::mutex> lock(devicesMutex);
+                dev = devices[mac];
+            }
+            connectDevice(connection, dev);
+        }
+        else if(cmd == "pair")
+        {
+            std::shared_ptr<BLEDevice> dev;
+            { 
+                std::lock_guard<std::mutex> lock(devicesMutex);
+                dev = devices[mac];
+            }
+            pairDevice(connection, dev);
+        }
+        else if(cmd == "read")
+        {
+            std::shared_ptr<BLEDevice> dev;
+            { 
+                std::lock_guard<std::mutex> lock(devicesMutex);
+                dev = devices[mac];
+            }
+            std::string ans = ReadCharacteristic(connection, *dev, "d52246df-98ac-4d21-be1b-70d5f66a5ddb", ValueType::HEX);
+            std::cout << ans << std::endl;
+        }
+        else if(cmd == "exit") break;
+
+    }
 
     connection->leaveEventLoop();
     loopThread.join();

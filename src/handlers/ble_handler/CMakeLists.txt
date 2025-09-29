@@ -3,11 +3,24 @@ project(ble_handler)
 
 set(CMAKE_CXX_STANDARD 17)
 
+# --- Dependencies ---
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDBUS REQUIRED sdbus-c++)
 
-include_directories(${SDBUS_INCLUDE_DIRS})
-link_directories(${SDBUS_LIBRARY_DIRS})
+find_package(nlohmann_json REQUIRED)
 
-add_executable(ble_handler ble_handler.cpp)
-target_link_libraries(ble_handler ${SDBUS_LIBRARIES} )
+# --- Target ---
+add_executable(ble_handler
+    ble_handler.cpp
+)
+
+# --- Includes ---
+target_include_directories(ble_handler PRIVATE
+    ${SDBUS_INCLUDE_DIRS}
+)
+
+# --- Libraries ---
+target_link_libraries(ble_handler PRIVATE
+    ${SDBUS_LIBRARIES}
+    nlohmann_json::nlohmann_json
+)
