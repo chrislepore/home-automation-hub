@@ -210,6 +210,107 @@ void add_device(const std::string mac)
     }
 }
 
+std::shared_ptr<BLEDevice> get_device(const std::string mac)
+{
+    std::lock_guard<std::mutex> lock(devicesMutex);
+    if (devices.find(mac) == devices.end()) return nullptr;
+    std::shared_ptr<BLEDevice> dev = devices[mac];
+    return dev;
+}
+
+void handleDevicePropertiesChanged(
+    std::weak_ptr<BLEDevice> weakDev,
+    std::weak_ptr<sdbus::IConnection> weakCon,
+    const std::string& interface,
+    const std::map<std::string, sdbus::Variant>& changed,
+    const std::vector<std::string>& invalidated)
+{
+    if (interface != DEVICE_IFACE)
+        return;
+
+    if (auto device = weakDev.lock()) { // ✅ safe
+        bool updated = false;
+
+        // Connected
+        auto it = changed.find("Connected");
+        if (it != changed.end()) {
+            bool connected = it->second.get<bool>();
+            device->setConnected(connected);
+            std::cout << "Device " << device->getAddress()
+                      << " updated Connected: " << connected << std::endl;
+            updated = true;
+
+            if (!connected)
+                device->setCharacteristics({});
+        }
+
+        // ServicesResolved (if true get characteristics)
+        it = changed.find("ServicesResolved");
+        if (it != changed.end()) {
+            bool resolved = it->second.get<bool>();
+            if (resolved) {
+                if (auto connection = weakCon.lock()) { // ✅ safe
+                    auto slashProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
+                    std::unordered_map<std::string, std::string> characteristics;
+                    std::map<sdbus::ObjectPath, std::map<std::string,
+                        std::map<std::string, sdbus::Variant>>> managedObjects;
+
+                    try {
+                        slashProxy->callMethod("GetManagedObjects")
+                                  .onInterface(DBUS_OM_IFACE)
+                                  .storeResultsTo(managedObjects);
+                    }
+                    catch (const sdbus::Error& e) {
+                        std::cerr << "Failed to GetManagedObjects: "
+                                  << e.getName() << " - " << e.getMessage() << "\n";
+                    }
+
+                    for (const auto& [objPath, interfaces] : managedObjects) {
+                        if (objPath.find(device->getPath()) != 0)
+                            continue;
+
+                        auto itChar = interfaces.find(Characteristic_IFACE);
+                        if (itChar != interfaces.end()) {
+                            const auto& props = itChar->second;
+                            if (props.count("UUID")) {
+                                std::string uuid = props.at("UUID").get<std::string>();
+                                characteristics[uuid] = objPath;
+                            }
+                        }
+                    }
+                    device->setCharacteristics(characteristics);
+                }
+            } else {
+                device->setCharacteristics({});
+            }
+        }
+
+        // Paired
+        it = changed.find("Paired");
+        if (it != changed.end()) {
+            bool paired = it->second.get<bool>();
+            device->setPaired(paired);
+            std::cout << "Device " << device->getAddress()
+                      << " updated Paired: " << paired << std::endl;
+            updated = true;
+        }
+
+        // Trusted
+        it = changed.find("Trusted");
+        if (it != changed.end()) {
+            bool trusted = it->second.get<bool>();
+            device->setTrusted(trusted);
+            std::cout << "Device " << device->getAddress()
+                      << " updated Trusted: " << trusted << std::endl;
+            updated = true;
+        }
+
+        if (updated) {
+            // Publish changes to MQTT or other system here
+        }
+    }
+}
+
 std::unordered_map<std::string, std::string> getCharacteristics(
     const sdbus::ObjectPath& devPath,
     const std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>>& managedObjects)
@@ -423,117 +524,44 @@ void Link_Devices(const std::shared_ptr<sdbus::IConnection>& connection, int sca
 
     for(const auto& [mac, dev] : *discovered)
     {
+        std::shared_ptr<BLEDevice> original;
         {
             std::lock_guard<std::mutex> lock(devicesMutex);
             if (devices.find(mac) == devices.end()) continue;
-            devices[mac] = dev;
+            original = devices[mac];
         }
-        auto path = dev->getPath();
+
+        // Copy over fields from the newly discovered BLEDevice
+        original->setPath(dev->getPath());
+        original->setDiscovered(dev->getDiscovered());
+        original->setConnected(dev->getConnected());
+        original->setPaired(dev->getPaired());
+        original->setTrusted(dev->getTrusted());
+        original->setCharacteristics(dev->getCharacteristics());
+
+        auto path = original->getPath();
 
         //---create signal handler---
         std::shared_ptr<sdbus::IProxy> proxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, path);
-        dev->setProxy(proxy);
+        original->setProxy(proxy);
 
         // Capture weak_ptr to device so handler won’t access dangling memory
-        std::weak_ptr<BLEDevice> weakDev = dev;
+        std::weak_ptr<BLEDevice> weakDev = original;
         std::weak_ptr<sdbus::IConnection> weakCon = connection;
 
-        dev->proxy->uponSignal("PropertiesChanged")
+        original->proxy->uponSignal("PropertiesChanged")
             .onInterface(PROPERTIES_IFACE)
             .call([weakDev, weakCon](const std::string& interface,
                     const std::map<std::string, sdbus::Variant>& changed,
                     const std::vector<std::string>& invalidated) {
-
-                if (interface != DEVICE_IFACE)
-                    return;
-
-                if (auto device = weakDev.lock()) { // ✅ safe
-                    bool updated = false;
-
-                    // Connected
-                    auto it = changed.find("Connected");
-                    if (it != changed.end()) {
-                        bool connected = it->second.get<bool>();
-                        device->setConnected(connected);
-                        std::cout << "Device " << device->getAddress()
-                                << " updated Connected: " << connected << std::endl;
-                        updated = true;
-
-                        if(!connected) device->setCharacteristics({});
-                    }
-       
-                    // ServicesResolved
-                    it = changed.find("ServicesResolved");
-                    if (it != changed.end()) {
-                        bool resolved = it->second.get<bool>();
-                        if(resolved)
-                        {
-                            if (auto connection = weakCon.lock()) { // ✅ safe
-                                // --search for characteristics--
-                                auto slashProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
-                                std::unordered_map<std::string, std::string> characteristics;
-                                std::map<sdbus::ObjectPath, std::map<std::string, std::map<std::string, sdbus::Variant>>> managedObjects;
-                                try {
-                                    slashProxy->callMethod("GetManagedObjects")
-                                        .onInterface(DBUS_OM_IFACE)
-                                        .storeResultsTo(managedObjects);
-                                } 
-                                catch (const sdbus::Error& e) {
-                                    std::cerr << "Faild to GetManagedObjects: " << e.getName() << " - " << e.getMessage() << "\n";
-                                }
-
-                                for (const auto& [objPath, interfaces] : managedObjects) {
-                                    // Only include characteristics belonging to this device
-                                    if (objPath.find(device->getPath()) != 0)
-                                        continue;
-
-                                    auto itChar = interfaces.find(Characteristic_IFACE);
-                                    if (itChar != interfaces.end()) {
-                                        const auto& props = itChar->second;
-                                        if (props.count("UUID")) {
-                                            std::string uuid = props.at("UUID").get<std::string>();
-                                            characteristics[uuid] = objPath; // path of characteristic
-                                        }
-                                    }
-                                }
-                                device->setCharacteristics(characteristics);
-                            }
-                        } 
-                        else 
-                            device->setCharacteristics({});
-                    }      
-
-                    // Paired
-                    it = changed.find("Paired");
-                    if (it != changed.end()) {
-                        bool paired = it->second.get<bool>();
-                        device->setPaired(paired);
-                        std::cout << "Device " << device->getAddress()
-                                << " updated Paired: " << paired << std::endl;
-                        updated = true;
-                    }
-
-                    // Trusted
-                    it = changed.find("Trusted");
-                    if (it != changed.end()) {
-                        bool trusted = it->second.get<bool>();
-                        device->setTrusted(trusted);
-                        std::cout << "Device " << device->getAddress()
-                                << " updated Trusted: " << trusted << std::endl;
-                        updated = true;
-                    }
-
-                    if (updated) {
-                        // Publish changes to MQTT or other system here
-                    }
-                }
+                handleDevicePropertiesChanged(weakDev, weakCon, interface, changed, invalidated);
         });
-        dev->proxy->finishRegistration();
+        original->proxy->finishRegistration();
 
         std::cout << "Added BLE device path: " << path << " to " << mac << std::endl;
 
-        if (!dev->getConnected()) connectDevice(connection, dev);
-        if (!dev->getPaired()) pairDevice(connection, dev);
+        if (!original->getConnected()) connectDevice(connection, original);
+        if (!original->getPaired()) pairDevice(connection, original);
     }
 }
 
@@ -763,11 +791,16 @@ std::string ReadCharacteristic(const std::shared_ptr<sdbus::IConnection>& connec
                                const std::string& uuid,
                                ValueType type)
 {
+    bool connected = device.getConnected();
+    if(!connected) {
+        return "Error: Device not connected";
+    }
+
     // Find the characteristic path from the device
     auto characteristics = device.getCharacteristics();
     auto it = characteristics.find(uuid);
     if (it == characteristics.end()) {
-        throw std::runtime_error("Characteristic " + uuid + " not found for device");
+        return ("Characteristic " + uuid + " not found for device");
     }
     std::string path = it->second;
 
@@ -866,7 +899,7 @@ std::string ReadCharacteristic(const std::shared_ptr<sdbus::IConnection>& connec
     return j.dump(); // return JSON string (ready to publish)
 }
 
-void WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
+bool WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
                          BLEDevice& device,
                          const std::string& uuid,
                          const std::vector<uint8_t>& value,
@@ -875,8 +908,8 @@ void WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
     // Find the characteristic path from the device
     auto characteristics = device.getCharacteristics();
     auto it = characteristics.find(uuid);
-    if (it == characteristics.end()) {
-        throw std::runtime_error("Characteristic " + uuid + " not found for device");
+    if (it == characteristics.end() || !device.getConnected()) {
+        return false;
     }
     std::string path = it->second;
 
@@ -896,7 +929,9 @@ void WriteCharacteristic(const std::shared_ptr<sdbus::IConnection>& connection,
     } 
     catch (const sdbus::Error& e) {
         std::cerr << "Faild to ReadValue: " << e.getName() << " - " << e.getMessage() << "\n";
+        return false;
     }
+    return true;
 }
 
 int main(int argc, char* argv[])
@@ -944,20 +979,26 @@ int main(int argc, char* argv[])
     add_device(mac);
 
     std::cout << "Device List---\n";
-    for(const auto& device : devices)
     {
-        std::cout << "device: " << device.second->getAddress() << std::endl;
-        std::cout << "path: " << device.second->getPath() << std::endl;
-        std::cout << "discovered: " << device.second->getDiscovered() << std::endl;
-        std::cout << "connected: " << device.second->getConnected() << std::endl;
-        std::cout << "paired: " << device.second->getPaired() << std::endl;
-        std::cout << "characteristics: " << std::endl;
-        for(const auto& [uuid, path] : device.second->getCharacteristics())
+        std::lock_guard<std::mutex> lock(devicesMutex);
+        for(const auto& device : devices)
         {
-            std::cout << "characteristic: " << uuid << "- " << path << std::endl;
+            std::cout << "device: " << device.second->getAddress() << std::endl;
+            std::cout << "path: " << device.second->getPath() << std::endl;
+            std::cout << "discovered: " << device.second->getDiscovered() << std::endl;
+            std::cout << "connected: " << device.second->getConnected() << std::endl;
+            std::cout << "trusted: " << device.second->getTrusted() << std::endl;
+            std::cout << "paired: " << device.second->getPaired() << std::endl;
+            std::cout << "characteristics: " << std::endl;
+            for(const auto& [uuid, path] : device.second->getCharacteristics())
+            {
+                std::cout << "characteristic: " << uuid << "- " << path << std::endl;
+            }
+            std::cout  << std::endl;
         }
-        std::cout  << std::endl;
     }
+
+    std::shared_ptr<BLEDevice> dev = get_device(mac);
 
     while(true)
     {
@@ -1008,29 +1049,14 @@ int main(int argc, char* argv[])
         }
         else if(cmd == "connect")
         {
-            std::shared_ptr<BLEDevice> dev;
-            { 
-                std::lock_guard<std::mutex> lock(devicesMutex);
-                dev = devices[mac];
-            }
             connectDevice(connection, dev);
         }
         else if(cmd == "disconnect")
         {
-            std::shared_ptr<BLEDevice> dev;
-            { 
-                std::lock_guard<std::mutex> lock(devicesMutex);
-                dev = devices[mac];
-            }
             DisconnectDevice(*dev);
         }
         else if(cmd == "pair")
         {
-            std::shared_ptr<BLEDevice> dev;
-            { 
-                std::lock_guard<std::mutex> lock(devicesMutex);
-                dev = devices[mac];
-            }
             pairDevice(connection, dev);
         }
         else if(cmd == "read")
@@ -1038,13 +1064,33 @@ int main(int argc, char* argv[])
             std::string Characteristic;
             std::cin >> Characteristic; 
 
-            std::shared_ptr<BLEDevice> dev;
-            { 
-                std::lock_guard<std::mutex> lock(devicesMutex);
-                dev = devices[mac];
-            }
-            std::string ans = ReadCharacteristic(connection, *dev, Characteristic, ValueType::HEX);
+            std::string ans = ReadCharacteristic(connection, *dev, Characteristic, ValueType::UINT16);
             std::cout << ans << std::endl;
+        }
+        else if(cmd == "readall")
+        {
+            for (size_t i = 0; i < 50; i++)
+            {
+                std::string ans = ReadCharacteristic(connection, *dev, "d52246df-98ac-4d21-be1b-70d5f66a5ddb", ValueType::HEX);
+                std::cout << ans << std::endl;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
+        else if(cmd == "write1")
+        {
+            std::string Characteristic = "cb9e957e-952d-4761-a7e1-4416494a5bfa";
+            //std::cin >> Characteristic; 
+
+            bool ans = WriteCharacteristic(connection, *dev, Characteristic, std::vector<uint8_t> {1});
+            std::cout << "write was: " << ans << std::endl;
+        }
+        else if(cmd == "write0")
+        {
+            std::string Characteristic = "cb9e957e-952d-4761-a7e1-4416494a5bfa";
+            // std::cin >> Characteristic; 
+
+            bool ans = WriteCharacteristic(connection, *dev, Characteristic, std::vector<uint8_t> {0});
+            std::cout << "write was: " << ans << std::endl;
         }
         else if(cmd == "exit") break;
 
