@@ -23,8 +23,11 @@ const std::string Characteristic_IFACE = "org.bluez.GattCharacteristic1";
 const std::string Descriptor_IFACE = "org.bluez.GattDescriptor1";
 const std::string PROPERTIES_IFACE = "org.freedesktop.DBus.Properties";
 
-//MQTT output topic
+//MQTT info
+const std::string SERVER_ADDRESS = "tcp://localhost:1883";
+const std::string CLIENT_ID = "ble_handler";
 const std::string OUTPUT_TOPIC{"home-automation/hub"};
+const std::string INPUT_TOPIC{"home-automation/ble_handler"};  // Topic to subscribe to
 
 //strusts & enum
 struct BLEDevice {
@@ -119,6 +122,17 @@ struct BLEDevice {
         return characteristics;
     }
 
+    void addCharacteristics(std::string uuid, std::string path) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (auto it = characteristics.find(uuid); it != characteristics.end()) return;
+        characteristics[uuid] = path;
+    }
+
+    void removeCharacteristics(std::string uuid) {
+        std::lock_guard<std::mutex> lock(mtx);
+        characteristics.erase(uuid);
+    }
+
     void setProxy(const std::shared_ptr<sdbus::IProxy>& value) {
         std::lock_guard<std::mutex> lock(mtx);
         proxy = value;
@@ -181,8 +195,8 @@ std::string get_string_property(const std::string& devicePath, std::string prope
 
 ScanHandle scanDevices(std::shared_ptr<std::unordered_map<std::string, std::shared_ptr<BLEDevice>>>& discovered, std::mutex& discoveredMutex,
                        int scanDurationMs = 0); // 0 = run until manually stopped
-bool pairDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries = 3, int timeoutMs = 5000);
-bool connectDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries = 3, int timeoutMs = 5000);
+bool pairDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries = 3, int timeoutMs = 10000);
+bool connectDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries = 3, int timeoutMs = 10000);
 bool DisconnectDevice(BLEDevice& device);
 void Link_Devices(int scanTimeMs = 20000);
 std::unordered_map<std::string, std::string> getCharacteristics(
@@ -205,7 +219,20 @@ std::shared_ptr<sdbus::IConnection> connection = sdbus::createSystemBusConnectio
 std::unordered_map<std::string, std::shared_ptr<BLEDevice>> devices; //key = mac address
 std::mutex devicesMutex;
 
-mqtt::async_client client("tcp://localhost:1883", "BLE_handler");
+mqtt::async_client client(SERVER_ADDRESS, CLIENT_ID);
+std::mutex mqtt_mutex;
+std::atomic<bool> mqtt_connected = false;
+
+void mqtt_publish(mqtt::message_ptr pubmsg)
+{
+    if (!mqtt_connected) {
+        std::cerr << "MQTT not connected\n";
+        return;
+    } else {
+        std::lock_guard<std::mutex> lock(mqtt_mutex);
+        client.publish(pubmsg);  // async publish
+    }
+}
 
 void add_device(const std::string mac)
 {
@@ -291,7 +318,7 @@ void add_device(const std::string mac)
     }
 
     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-    client.publish(pubmsg);
+    mqtt_publish(pubmsg);
 }
 
 void remove_device(const std::string mac)
@@ -310,7 +337,7 @@ void remove_device(const std::string mac)
             std::cout << "[Error] Device removed: Device not found-> " << mac << std::endl;
             j["Error"] = "Device not found";
             mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-            client.publish(pubmsg);
+            mqtt_publish(pubmsg);
             return;  // Device not found
         }
 
@@ -330,7 +357,7 @@ void remove_device(const std::string mac)
     std::cout << "Device removed: " << mac << std::endl;
     j["device_mac"] = mac;
     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-    client.publish(pubmsg);
+    mqtt_publish(pubmsg);
 }
 
 
@@ -372,12 +399,12 @@ void handleDevicePropertiesChanged(
 
             if (connected) 
                 if(!device->getTrusted()) set_bool_property(device->getPath(), "Trusted", true);
-            else 
-                device->setCharacteristics({});
+            //else 
+                //device->setCharacteristics({});
         }
 
         // ServicesResolved (if true get characteristics)
-        it = changed.find("ServicesResolved");
+        /*it = changed.find("ServicesResolved");
         if (it != changed.end()) {
             bool resolved = it->second.get<bool>();
             if (resolved) {
@@ -400,7 +427,7 @@ void handleDevicePropertiesChanged(
             } else {
                 device->setCharacteristics({});
             }
-        }
+        }*/
 
         // Paired
         it = changed.find("Paired");
@@ -466,7 +493,7 @@ void handleDevicePropertiesChanged(
         if (updated) {
             // Publish changes to MQTT or other system here
             mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-            client.publish(pubmsg);
+            mqtt_publish(pubmsg);
         }
     }
 }
@@ -551,7 +578,7 @@ ScanHandle scanDevices(std::shared_ptr<std::unordered_map<std::string, std::shar
                     j["trusted"] = dev->trusted;
 
                     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-                    client.publish(pubmsg);
+                    mqtt_publish(pubmsg);
                 }
             }
         }
@@ -595,7 +622,7 @@ ScanHandle scanDevices(std::shared_ptr<std::unordered_map<std::string, std::shar
                     j["trusted"] = dev->trusted;
 
                     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-                    client.publish(pubmsg);
+                    mqtt_publish(pubmsg);
                 }
             }
         }
@@ -620,7 +647,7 @@ ScanHandle scanDevices(std::shared_ptr<std::unordered_map<std::string, std::shar
                         j["device_mac"] = it2->second->address;
 
                         mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-                        client.publish(pubmsg);
+                        mqtt_publish(pubmsg);
                         it2 = discovered->erase(it2);
                     } else {
                         ++it2;
@@ -930,7 +957,7 @@ bool connectDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries, int
             std::cout << "[OK] Device connected successfully on attempt " 
                       << attempt << std::endl;
 
-            auto slashProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
+            /*auto slashProxy = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, "/");
             std::map<sdbus::ObjectPath, std::map<std::string,
                 std::map<std::string, sdbus::Variant>>> managedObjects;
 
@@ -943,7 +970,7 @@ bool connectDevice(const std::shared_ptr<BLEDevice>& device, int maxRetries, int
                 std::cerr << "Failed to GetManagedObjects: "
                         << e.getName() << " - " << e.getMessage() << "\n";
             }
-            device->setCharacteristics(getCharacteristics(device->getPath(), managedObjects));
+            device->setCharacteristics(getCharacteristics(device->getPath(), managedObjects));*/
             
             return true;
         }
@@ -1016,13 +1043,19 @@ std::string ReadCharacteristic(BLEDevice& device, const std::string& uuid)
     j["device_mac"] = device.getAddress();
     j["uuid"]  = uuid;
 
-    // Raw hex string
-    std::ostringstream rawHex;
-    for (auto b : response) {
-        rawHex << std::hex << std::setw(2) << std::setfill('0')
-               << static_cast<int>(b);
-    }
-    j["data"] = rawHex.str();
+    // Convert data to hex string
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (uint8_t byte : response)
+        oss << std::setw(2) << static_cast<int>(byte) << " ";
+
+    std::string dataStr = oss.str();
+
+    // Trim trailing space (optional)
+    if (!dataStr.empty() && dataStr.back() == ' ')
+        dataStr.pop_back();
+
+    j["data"] = dataStr;
 
     return j.dump(); // return JSON string (ready to publish)
 }
@@ -1058,17 +1091,46 @@ bool WriteCharacteristic(BLEDevice& device, const std::string& uuid, const std::
     return true;
 }
 
-class callback : public virtual mqtt::callback
+std::vector<uint8_t> hexStringToBytesLE(const std::string& hex)
 {
-public:
-    // Called when the client successfully connects to the broker
-    void connected(const std::string& cause) override {
-        std::cout << "Connected: " << cause << std::endl;
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        std::string byteStr = hex.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(std::stoul(byteStr, nullptr, 16));
+        bytes.push_back(byte);
     }
 
-    // Called when the connection is lost
+    // Reverse for little endian {low byte first}
+    //std::reverse(bytes.begin(), bytes.end());
+    return bytes;
+}
+
+class callback : public virtual mqtt::callback
+{
+    mqtt::async_client& client;
+    std::atomic<bool>& exit;
+    
+public:
+    explicit callback(mqtt::async_client& cli, std::atomic<bool>& ex) : client(cli), exit(ex) {}
+
+    // --- Called when connected or reconnected ---
+    void connected(const std::string& cause) override {
+        std::cout << "[MQTT] Connected: " << cause << std::endl;
+        mqtt_connected = true;
+        try {
+            // Resubscribe (important if broker reset)
+            client.subscribe(INPUT_TOPIC, 1);
+            std::cout << "[MQTT] Subscribed to topic: " << INPUT_TOPIC << std::endl;
+        } catch (const mqtt::exception& e) {
+            std::cerr << "[MQTT] Subscribe failed: " << e.what() << std::endl;
+        }
+    }
+
+    // --- Called when connection is lost ---
     void connection_lost(const std::string& cause) override {
-        std::cout << "Connection lost: " << cause << std::endl;
+        mqtt_connected = false;
+        std::cout << "[MQTT] Connection lost: " << cause << std::endl;
+        std::cout << "[MQTT] Will auto-reconnect..." << std::endl;
     }
 
     // Called when a message arrives on a subscribed topic
@@ -1089,14 +1151,14 @@ public:
             std::string command = j["command"];
 
             // Dispatch logic based on command type
-            if (command == "add_devices") {
+            if (command == "exit") {
+                exit = true;
+            }
+            else if (command == "add_devices") {
                 for (const auto& mac : j["mac"]) {
                     std::cout << "Adding device " << mac << std::endl;
                     add_device(mac);
                 }
-            }
-            else if (command == "add_discovered") {
-                
             }
             else if (command == "remove_devices") {
                 for (const auto& mac : j["mac"]) {
@@ -1125,12 +1187,6 @@ public:
                     }
                 }
             }
-            /*else if (command == "link_devices") {
-                std::cout << "linking devices" << std::endl;
-                std::thread([] {
-                    Link_Devices();
-                }).detach();
-            }*/
             else if (command == "read_characteristic") {
                 std::string mac = j["mac"];
                 std::string uuid = j["uuid"];
@@ -1138,7 +1194,7 @@ public:
                         << " from device " << mac << std::endl;
 
                 // Run BLE read in a separate thread to avoid blocking the MQTT callback
-                std::thread([mac, uuid]() {
+                std::thread([this, mac, uuid]() {
                     auto dev = get_device(mac);
                     if (!dev) {
                         std::cerr << "Device " << mac << " not found" << std::endl;
@@ -1154,7 +1210,7 @@ public:
                         j_resp["uuid"] = uuid;
                         j_resp["error"] = "Device not connected";
                         mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j_resp.dump());
-                        client.publish(pubmsg);  // async publish
+                        mqtt_publish(pubmsg);
                         return;
                     }
 
@@ -1169,13 +1225,13 @@ public:
                         j_resp["uuid"] = uuid;
                         j_resp["error"] = e.what();
                         mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j_resp.dump());
-                        client.publish(pubmsg);
+                        mqtt_publish(pubmsg);
                         return;
                     }
 
                     // Publish asynchronously
                     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, response);
-                    client.publish(pubmsg);  // no ->wait(), async
+                    mqtt_publish(pubmsg);
                 }).detach();  // detach thread
             }
             else if (command == "write_characteristic") {
@@ -1184,8 +1240,8 @@ public:
                 std::string value = j["value"];
                 std::cout << "Writing " << value << " to characteristic " << uuid 
                           << " on device " << mac << std::endl;
-                std::vector<uint8_t> bytes(value.begin(), value.end());
-                WriteCharacteristic(*get_device(mac), uuid, {5, 0});
+                auto bytes = hexStringToBytesLE(value);
+                WriteCharacteristic(*get_device(mac), uuid, bytes);
             }
             else if (command == "scan_devices_on") {
                 std::cout << "Scanning devices..." << std::endl;
@@ -1276,7 +1332,30 @@ int main(int argc, char* argv[])
                     j["trusted"] = dev->trusted;
 
                     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-                    client.publish(pubmsg);
+                    mqtt_publish(pubmsg);
+                }
+            }
+            else if (auto it = ifaces.find(Characteristic_IFACE); it != ifaces.end())
+            {
+                auto pos = path.find("dev_");
+                if (pos == std::string::npos)
+                    return;
+
+                std::string mac = path.substr(pos + 4, 17); // skip "dev_"
+                std::replace(mac.begin(), mac.end(), '_', ':');
+
+                std::shared_ptr<BLEDevice> dev;
+                {
+                    std::lock_guard<std::mutex> lock(devicesMutex);
+                    auto devMap = devices.find(mac);
+                    if(devMap == devices.end()) return;
+                    dev = devMap->second;
+                }
+
+                const auto& props = it->second;
+                if (auto itUuid = props.find("UUID"); itUuid != props.end()) {
+                    std::string uuid = itUuid->second.get<std::string>();
+                    dev->addCharacteristics(uuid, path);
                 }
             }
     });
@@ -1292,7 +1371,7 @@ int main(int argc, char* argv[])
                     if (pos == std::string::npos)
                         return;
 
-                    std::string mac = path.substr(pos + 4); // skip "dev_"
+                    std::string mac = path.substr(pos + 4); // skip "dev_" and after mac
                     std::replace(mac.begin(), mac.end(), '_', ':');
                     
                     std::shared_ptr<BLEDevice> dev;
@@ -1319,7 +1398,32 @@ int main(int argc, char* argv[])
                     j["trusted"] = dev->trusted;
 
                     mqtt::message_ptr pubmsg = mqtt::make_message(OUTPUT_TOPIC, j.dump());
-                    client.publish(pubmsg);
+                    mqtt_publish(pubmsg);
+                }
+                else if (iface == Characteristic_IFACE)
+                {
+                    auto pos = path.find("dev_");
+                    if (pos == std::string::npos)
+                        return;
+
+                    std::string mac = path.substr(pos + 4, 17); // skip "dev_" and after mac
+                    std::cout << mac << std::endl;
+                    std::replace(mac.begin(), mac.end(), '_', ':');
+                    std::cout << mac << std::endl;
+
+                    std::shared_ptr<BLEDevice> dev;
+                    {
+                        std::lock_guard<std::mutex> lock(devicesMutex);
+                        auto devMap = devices.find(mac);
+                        if(devMap == devices.end()) return;
+                        dev = devMap->second;
+                    }
+
+                    auto characteristics = dev->getCharacteristics();
+                    for (const auto& [uuid, Charpath] : characteristics)
+                    {
+                        if (path == Charpath) dev->removeCharacteristics(uuid);
+                    }
                 }
             }
     });
@@ -1331,41 +1435,51 @@ int main(int argc, char* argv[])
     });
 
     auto adapter = sdbus::createProxy(*connection, BLUEZ_SERVICE_NAME, ADAPTER_PATH);
+
     try {
-        adapter->callMethod("StartDiscovery").onInterface(ADAPTER_IFACE);
-    } 
-    catch (const sdbus::Error& e) {
-        std::cerr << "Faild to start discovery: " << e.getName() << " - " << e.getMessage() << "\n";
-    }
+        std::atomic<bool> exit = false;
+        callback cb(client, exit);
+        client.set_callback(cb);
 
-    //write code here
-    const std::string INPUT_TOPIC{"home-automation/ble_handler"};  // Topic to subscribe to
+        mqtt::connect_options connOpts;
+        connOpts.set_automatic_reconnect(true);
+        connOpts.set_clean_session(false); // Keep subscriptions
+        connOpts.set_keep_alive_interval(20);
+        connOpts.set_connect_timeout(10);
 
-    callback cb;
-    client.set_callback(cb);
-
-    // Connect to broker
-    mqtt::connect_options connOpts;
-    try {
-        std::cout << "Connecting to the MQTT broker..." << std::endl;
+        std::cout << "[MQTT] Connecting to broker..." << std::endl;
         client.connect(connOpts)->wait();
+        std::cout << "[MQTT] Connected.\n";
 
         // Subscribe
         std::cout << "Subscribing to topic: " << INPUT_TOPIC << std::endl;
         client.subscribe(INPUT_TOPIC, 1)->wait();
 
         // Keep the program alive to receive messages
-        while (true) {
-            //std::this_thread::sleep_for(std::chrono::seconds(1));
-            std::string cmd;
-            std::cin >> cmd; 
-            if(cmd == "exit") break;
+        while (!exit) {
+            try {
+                adapter->callMethod("StartDiscovery").onInterface(ADAPTER_IFACE);
+            } 
+            catch (const sdbus::Error& e) {
+                std::cerr << "Faild to start discovery: " << e.getName() << " - " << e.getMessage() << "\n";
+            }
+
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+
+            try {
+                adapter->callMethod("StopDiscovery").onInterface(ADAPTER_IFACE);
+                std::cout << "Scanning reset in 1 second." << std::endl;
+            } catch (const std::exception& ex) {
+                std::cerr << "StopDiscovery failed: " << ex.what() << std::endl;
+            }
+
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
 
-        // client.disconnect()->wait();
+        client.disconnect()->wait();
     }
-    catch (const mqtt::exception& exc) {
-        std::cerr << "Error: " << exc.what() << std::endl;
+    catch (const mqtt::exception& e) {
+        std::cerr << "[MQTT] Fatal error: " << e.what() << std::endl;
         return 1;
     }
 
